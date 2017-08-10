@@ -137,6 +137,25 @@ typedef struct {
     U32 addr;
 } THREAD_DETAIL;
 
+typedef struct {
+  U8  Data[0xD0];     // stack data, maximum possible stack size
+  U32 Pointer;        // stack pointer
+  U32 ThreadID;       // thread ID
+} STACK_MEM;
+
+typedef struct {
+  signed short   offset;
+  unsigned short bits;
+} STACK_REGS;
+
+typedef struct _Stacking {
+  unsigned char     RegistersSize;
+  signed char       GrowthDirection;
+  unsigned char     OutputRegisters;
+  U32             (*CalcProcessStack) (const struct _Stacking *Stacking, const U8 *StackData, U32 StackPtr);
+  const STACK_REGS *RegisterOffsets;
+} STACKING;
+
 /*********************************************************************
  *
  *       Static data
@@ -146,12 +165,100 @@ typedef struct {
 
 static const GDB_API *_pAPI;
 
+static STACK_MEM _StackMem;
+
 static struct {
+    const STACKING *StackingInfo;
     U32 current_threadid;
     U8 thread_count;
     U32 num_thread_details;
     THREAD_DETAIL *thread_details;
 } _MynewtOS;
+
+static const STACK_REGS _CortexM4FStackOffsets[] = {
+  { 0x20, 32 },    // R0
+  { 0x24, 32 },    // R1
+  { 0x28, 32 },    // R2
+  { 0x2C, 32 },    // R3
+  { 0x00, 32 },    // R4
+  { 0x04, 32 },    // R5
+  { 0x08, 32 },    // R6
+  { 0x0C, 32 },    // R7
+  { 0x10, 32 },    // R8
+  { 0x14, 32 },    // R9
+  { 0x18, 32 },    // R10
+  { 0x1C, 32 },    // R11
+  { 0x30, 32 },    // R12
+  { -2,   32 },    // SP
+  { 0x34, 32 },    // LR
+  { 0x38, 32 },    // PC
+  { 0x3C, 32 },    // XPSR
+  { -1,   32 },    // MSP
+  { -1,   32 },    // PSP
+  { -1,   32 },    // PRIMASK
+  { -1,   32 },    // BASEPRI
+  { -1,   32 },    // FAULTMASK
+  { -1,   32 },    // CONTROL
+};
+
+static const STACK_REGS _CortexM4FStackOffsetsVFP[] = {
+  { 0x68, 32 },    // R0
+  { 0x6C, 32 },    // R1
+  { 0x70, 32 },    // R2
+  { 0x74, 32 },    // R3
+  { 0x04, 32 },    // R4
+  { 0x08, 32 },    // R5
+  { 0x0C, 32 },    // R6
+  { 0x10, 32 },    // R7
+  { 0x14, 32 },    // R8
+  { 0x18, 32 },    // R9
+  { 0x1C, 32 },    // R10
+  { 0x20, 32 },    // R11
+  { 0x78, 32 },    // R12
+  { -2,   32 },    // SP
+  { 0x7C, 32 },    // LR
+  { 0x80, 32 },    // PC
+  { 0x84, 32 },    // XPSR
+  { -1,   32 },    // MSP
+  { -1,   32 },    // PSP
+  { -1,   32 },    // PRIMASK
+  { -1,   32 },    // BASEPRI
+  { -1,   32 },    // FAULTMASK
+  { -1,   32 },    // CONTROL
+  { 0xC8, 32 },    // FPSCR
+  { 0x88, 32 },    // S0
+  { 0x8C, 32 },    // S1
+  { 0x90, 32 },    // S2
+  { 0x94, 32 },    // S3
+  { 0x98, 32 },    // S4
+  { 0x9C, 32 },    // S5
+  { 0xA0, 32 },    // S6
+  { 0xA4, 32 },    // S7
+  { 0xA8, 32 },    // S8
+  { 0xAC, 32 },    // S9
+  { 0xB0, 32 },    // S10
+  { 0xB4, 32 },    // S11
+  { 0xB8, 32 },    // S12
+  { 0xBC, 32 },    // S13
+  { 0xC0, 32 },    // S14
+  { 0xC4, 32 },    // S15
+  { 0x28, 32 },    // S16
+  { 0x2C, 32 },    // S17
+  { 0x30, 32 },    // S18
+  { 0x34, 32 },    // S19
+  { 0x38, 32 },    // S20
+  { 0x3C, 32 },    // S21
+  { 0x40, 32 },    // S22
+  { 0x44, 32 },    // S23
+  { 0x48, 32 },    // S24
+  { 0x4C, 32 },    // S25
+  { 0x50, 32 },    // S26
+  { 0x54, 32 },    // S27
+  { 0x58, 32 },    // S28
+  { 0x5C, 32 },    // S29
+  { 0x60, 32 },    // S30
+  { 0x64, 32 },    // S31
+};
 
 static RTOS_SYMBOLS _Symbols[] = {
     { "g_task_id", 0, 0 },
@@ -163,6 +270,46 @@ enum RTOS_Symbol_Values {
     g_task_id = 0,
     g_current_task,
     g_os_task_list,
+};
+
+static U32 _DoCortexMStackAlign(const STACKING *stacking, const U8 *StackData, U32 StackPtr, size_t XPSROffset) {
+  const U32 ALIGN_NEEDED = (1 << 9);
+  U32 xpsr;
+  U32 NewStackPtr;
+
+  NewStackPtr = StackPtr - stacking->GrowthDirection * stacking->RegistersSize;
+  xpsr = _pAPI->pfLoad32TE(&StackData[XPSROffset]);
+  if ((xpsr & ALIGN_NEEDED) != 0) {
+    _pAPI->pfWarnOutf("XPSR(0x%08X) indicated stack alignment was necessary.\n", xpsr);
+    NewStackPtr -= (stacking->GrowthDirection * 4);
+  }
+  return NewStackPtr;
+}
+
+static U32 _CortexM4FStackAlign(const STACKING *stacking, const U8 *StackData, U32 StackPtr) {
+  const int XPSROffset = 0x44;
+  return _DoCortexMStackAlign(stacking, StackData, StackPtr, XPSROffset);
+}
+
+static U32 _CortexM4FStackAlignVFP(const STACKING *stacking, const U8 *StackData, U32 StackPtr) {
+  const int XPSROffset = 0x84;
+  return _DoCortexMStackAlign(stacking, StackData, StackPtr, XPSROffset);
+}
+
+static const STACKING _CortexM4FStacking = {
+  0x48,                         // RegistersSize
+  -1,                           // GrowthDirection
+  17,                           // OutputRegisters
+  _CortexM4FStackAlign,         // stack_alignment
+  _CortexM4FStackOffsets        // RegisterOffsets
+};
+
+static const STACKING _CortexM4FStackingVFP = {
+  0xD0,                         // RegistersSize
+  -1,                           // GrowthDirection
+  17,                           // OutputRegisters
+  _CortexM4FStackAlignVFP,      // stack_alignment
+  _CortexM4FStackOffsetsVFP     // RegisterOffsets
 };
 
 /*********************************************************************
@@ -206,6 +353,93 @@ static void _FreeThreadlist() {
     }
 }
 
+/*********************************************************************
+ *
+ *       _ReadStack(U32 threadid)
+ *
+ *  Function description
+ *    Reads the task stack of the task with the ID threadid into _StackMem.
+ */
+static int _ReadStack(U32 threadid) {
+    U32 retval;
+    U32 i;
+    U32 task;
+    U32 StackPtr;
+    U32 PC;
+    U32 address;
+    //
+    // search for thread ID
+    //
+    task = 0;
+    for (i = 0; i < _MynewtOS.thread_count; i++) {
+        if (_MynewtOS.thread_details[i].id == threadid) {
+            task = i;
+            goto found;
+            break;
+        }
+    }
+    _pAPI->pfErrorOutf("Task not found.\n");
+    return -2;
+
+found:
+    retval = _pAPI->pfReadU32(_MynewtOS.thread_details[task].addr, &StackPtr);
+    if (retval != 0) {
+        _pAPI->pfErrorOutf("Error reading stack frame from embOS task.\n");
+        return retval;
+    }
+
+    _pAPI->pfWarnOutf("Read stack pointer at 0x%08X, value 0x%08X.\n",
+            _MynewtOS.thread_details[task].addr, StackPtr);
+
+    if (StackPtr == 0) {
+        _pAPI->pfErrorOutf("Null stack pointer in task.\n");
+        return -3;
+    }
+
+    _MynewtOS.StackingInfo = &_CortexM4FStacking;
+
+//start:
+    address = StackPtr;
+
+    if (_MynewtOS.StackingInfo->GrowthDirection == 1)
+        address -= _MynewtOS.StackingInfo->RegistersSize;
+
+    retval = _pAPI->pfReadMem(address, (char*) _StackMem.Data,
+            _MynewtOS.StackingInfo->RegistersSize);
+    if (retval == 0) {
+        _pAPI->pfErrorOutf("Error reading stack frame from task.\n");
+        return retval;
+    }
+
+    _pAPI->pfWarnOutf("Read stack frame at 0x%08X.\n", address);
+    retval = _pAPI->pfLoad32TE(&_StackMem.Data[0x24]);
+//
+//    if (_MynewtOS.StackingInfo == &_CortexM4FStacking && !(retval & 0x10)) {
+//        _pAPI->pfWarnOutf(
+//                "LR(0x%08X) indicated task uses VFP, reading stack frame again.\n",
+//                retval);
+//        _MynewtOS.StackingInfo = &_CortexM4FStackingVFP;
+//        goto start;
+//    }
+//
+    //
+    // calculate stack pointer
+    //
+//    if (_MynewtOS.StackingInfo->CalcProcessStack != NULL) {
+//        _StackMem.Pointer = _MynewtOS.StackingInfo->CalcProcessStack(
+//                _MynewtOS.StackingInfo, _StackMem.Data, StackPtr);
+//    } else {
+//        _StackMem.Pointer = StackPtr
+//                - _MynewtOS.StackingInfo->GrowthDirection
+//                        * _MynewtOS.StackingInfo->RegistersSize;
+//    }
+
+    _StackMem.Pointer = StackPtr +4;
+
+    _StackMem.ThreadID = threadid;
+    return 0;
+}
+
 /****************************************************************************/
 
 static const char *taskStateDesc(U8 state) {
@@ -217,7 +451,6 @@ static const char *taskStateDesc(U8 state) {
     default:
         return "Unknown";
     }
-
 }
 
 /*
@@ -379,6 +612,7 @@ static int readTaskList(U32 addr) {
 
         /* TODO: HACK! Eclipse doesn't like threadid=0? */
         _MynewtOS.thread_details[tasks_found].id = task_obj.t_taskid + 1;
+        _MynewtOS.thread_details[tasks_found].addr = task_ptr;
 
         if (task_obj.t_name == 0) {
             break;
@@ -481,11 +715,78 @@ EXPORT int RTOS_GetThreadDisplay(char *pDisplay, U32 threadid) {
 }
 
 EXPORT int RTOS_GetThreadReg(char *pHexRegVal, U32 RegIndex, U32 threadid) {
-    return -1;
+    int retval;
+    I32 j;
+    STACK_REGS reg;
+
+    _pAPI->pfWarnOutf("GetThreadDisplay: RegIndex=%d, threadid=%d\n", RegIndex, threadid);
+
+    if (threadid == _MynewtOS.current_threadid) {
+        return -1; // Current thread or current execution returns CPU registers
+    }
+
+    //
+    // load stack memory if necessary
+    //
+    if (_StackMem.ThreadID != threadid) {
+        retval = _ReadStack(threadid);
+        if (retval != 0) {
+            return retval;
+        }
+    }
+    reg = _MynewtOS.StackingInfo->RegisterOffsets[RegIndex];
+
+//    if (RegIndex > 0x16 && _MynewtOS.StackingInfo == &_CortexM4FStackingVFP) {
+        for (j = 0; j < reg.bits / 8; j++) {
+            if (reg.offset == -1) {
+                pHexRegVal += snprintf(pHexRegVal, 3, "%02x", 0);
+            } else if (reg.offset == -2) {
+                pHexRegVal += snprintf(pHexRegVal, 3, "%02x",
+                        ((U8 *) &_StackMem.Pointer)[j]);
+            } else {
+                pHexRegVal += snprintf(pHexRegVal, 3, "%02x", _StackMem.Data[reg.offset + j]);
+            }
+        }
+        _pAPI->pfWarnOutf("Read task register 0x%02X, addr 0x%08X.\n", RegIndex,
+                _MynewtOS.StackingInfo->RegisterOffsets[RegIndex].offset);
+        return 0;
+//    } else {
+//        return -1;
+//    }
 }
 
 EXPORT int RTOS_GetThreadRegList(char *pHexRegList, U32 threadid) {
-    return -1;
+    int retval;
+    U32 i;
+    I32 j;
+
+    if (threadid == _MynewtOS.current_threadid) {
+      return -1; // Current thread or current execution returns CPU registers
+    }
+
+    //
+    // load stack memory if necessary
+    //
+    if (_StackMem.ThreadID != threadid) {
+      retval = _ReadStack(threadid);
+      if (retval != 0) {
+        return retval;
+      }
+    }
+
+    for (i = 0; i < _MynewtOS.StackingInfo->OutputRegisters; i++) {
+      for (j = 0; j < _MynewtOS.StackingInfo->RegisterOffsets[i].bits/8; j++) {
+        if (_MynewtOS.StackingInfo->RegisterOffsets[i].offset == -1) {
+          pHexRegList += snprintf(pHexRegList, 3, "%02x", 0);
+        } else if (_MynewtOS.StackingInfo->RegisterOffsets[i].offset == -2) {
+          pHexRegList += snprintf(pHexRegList, 3, "%02x", ((U8 *)&_StackMem.Pointer)[j]);
+        } else {
+          pHexRegList += snprintf(pHexRegList, 3, "%02x",
+            _StackMem.Data[_MynewtOS.StackingInfo->RegisterOffsets[i].offset + j]);
+        }
+      }
+    }
+    return 0;
 }
 
 EXPORT int RTOS_SetThreadReg(char* pHexRegVal, U32 RegIndex, U32 threadid) {
