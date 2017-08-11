@@ -287,7 +287,7 @@ static U32 _DoCortexMStackAlign(const STACKING *stacking, const U8 *StackData, U
 }
 
 static U32 _CortexM4FStackAlign(const STACKING *stacking, const U8 *StackData, U32 StackPtr) {
-  const int XPSROffset = 0x44;
+  const int XPSROffset = 0x3C;
   return _DoCortexMStackAlign(stacking, StackData, StackPtr, XPSROffset);
 }
 
@@ -297,7 +297,7 @@ static U32 _CortexM4FStackAlignVFP(const STACKING *stacking, const U8 *StackData
 }
 
 static const STACKING _CortexM4FStacking = {
-  0x48,                         // RegistersSize
+  16*4,                         // RegistersSize
   -1,                           // GrowthDirection
   17,                           // OutputRegisters
   _CortexM4FStackAlign,         // stack_alignment
@@ -425,16 +425,14 @@ found:
     //
     // calculate stack pointer
     //
-//    if (_MynewtOS.StackingInfo->CalcProcessStack != NULL) {
-//        _StackMem.Pointer = _MynewtOS.StackingInfo->CalcProcessStack(
-//                _MynewtOS.StackingInfo, _StackMem.Data, StackPtr);
-//    } else {
-//        _StackMem.Pointer = StackPtr
-//                - _MynewtOS.StackingInfo->GrowthDirection
-//                        * _MynewtOS.StackingInfo->RegistersSize;
-//    }
-
-    _StackMem.Pointer = StackPtr +4;
+    if (_MynewtOS.StackingInfo->CalcProcessStack != NULL) {
+        _StackMem.Pointer = _MynewtOS.StackingInfo->CalcProcessStack(
+                _MynewtOS.StackingInfo, _StackMem.Data, StackPtr);
+    } else {
+        _StackMem.Pointer = StackPtr
+                - _MynewtOS.StackingInfo->GrowthDirection
+                        * _MynewtOS.StackingInfo->RegistersSize;
+    }
 
     _StackMem.ThreadID = threadid;
     return 0;
