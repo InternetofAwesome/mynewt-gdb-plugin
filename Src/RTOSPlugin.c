@@ -174,7 +174,7 @@ static struct {
     THREAD_DETAIL *task_details;
 } mynewt_os;
 
-static const STACK_REGS cortex_m4_stack_offsets[] = {
+static const STACK_REGS cortex_m_stack_offsets[] = {
     { 0x20, 32 },    // R0
     { 0x24, 32 },    // R1
     { 0x28, 32 },    // R2
@@ -228,17 +228,17 @@ static U32 cortex_m_stack_align(const STACKING *stacking, const U8 *stack_data,
     return new_stack_ptr;
 }
 
-static U32 cortex_m4_stack_align(const STACKING *stacking,
+static U32 cortex_m0_m4_stack_align(const STACKING *stacking,
                                  const U8 *stack_data, U32 stack_ptr) {
     return cortex_m_stack_align(stacking, stack_data, stack_ptr, 0x3C);
 }
 
-static const STACKING cortex_m4_stacking = {
+static const STACKING cortex_m_stacking = {
     16*4,                         // RegistersSize
     -1,                           // GrowthDirection
     17,                           // OutputRegisters
-    cortex_m4_stack_align,        // stack_alignment
-    cortex_m4_stack_offsets       // RegisterOffsets
+	cortex_m0_m4_stack_align,        // stack_alignment
+    cortex_m_stack_offsets       // RegisterOffsets
 };
 
 /*********************************************************************
@@ -311,7 +311,7 @@ found:
         return -3;
     }
 
-    mynewt_os.stacking_info = &cortex_m4_stacking;
+    mynewt_os.stacking_info = &cortex_m_stacking;
 
     address = stack_ptr;
 
@@ -557,7 +557,7 @@ EXPORT int RTOS_Init(const GDB_API *pAPI, U32 core) {
     gdb_api = pAPI;
     memset(&mynewt_os, 0, sizeof(mynewt_os));
 
-    if (core == JLINK_CORE_CORTEX_M4) {
+    if (core == JLINK_CORE_CORTEX_M4 || core == JLINK_CORE_CORTEX_M0) {
         return 1;
     }
     return 0;
